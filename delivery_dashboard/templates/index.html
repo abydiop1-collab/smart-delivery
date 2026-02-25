@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Smart Delivery Dakar</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; margin: 0; display: flex; height: 100vh; background: #1a1c23; color: white; overflow: hidden; }
+        #sidebar { width: 350px; padding: 20px; background: #242731; border-right: 1px solid #333; z-index: 10; display: flex; flex-direction: column; }
+        #map { flex-grow: 1; height: 100vh; background: #f0f0f0; } 
+        
+        .stats-container { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }
+        .stat-box { background: #2d303a; padding: 12px; border-radius: 8px; text-align: center; border-bottom: 3px solid #60a5fa; }
+        .stat-box.alert { border-bottom-color: #f87171; }
+        .stat-label { color: #94a3b8; font-size: 0.7em; font-weight: bold; text-transform: uppercase; }
+        .stat-value { font-size: 1.4em; display: block; margin-top: 4px; }
+
+        .section-title { 
+            color: #94a3b8; font-size: 0.9em; font-weight: bold; 
+            text-transform: uppercase; margin: 15px 0 10px 0;
+            border-bottom: 1px solid #333; padding-bottom: 5px;
+        }
+
+        .driver-card { background: #2d303a; border-radius: 10px; padding: 15px; margin-bottom: 10px; border-left: 5px solid #4ade80; transition: all 0.3s; }
+        .warning { border-left-color: #fbbf24; }
+        .critical { border-left-color: #f87171; }
+        
+        .controls { margin-bottom: 10px; display: flex; gap: 5px; }
+        input { padding: 8px; border-radius: 5px; border: none; flex-grow: 1; color: black; }
+        button { padding: 8px 15px; border-radius: 5px; border: none; cursor: pointer; font-weight: bold; }
+        .btn-add { background: #4ade80; color: #1a1c23; }
+        .btn-del { background: #f87171; color: white; }
+        progress { width: 100%; height: 6px; border-radius: 3px; }
+        
+        .bike-icon { font-size: 28px; text-align: center; line-height: 1; filter: drop-shadow(0px 2px 2px rgba(0,0,0,0.5)); }
+
+        /* Style des étiquettes de noms sur la carte */
+        .leaflet-tooltip.custom-label {
+            background-color: white; color: #1a1c23; border: 1px solid #333;
+            border-radius: 4px; font-weight: bold; font-size: 12px; padding: 2px 6px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        }
+    </style>
+</head>
+<body>
+
+<div id="sidebar">
+    <h2>🚲 Smart Delivery</h2>
+    <div class="stats-container">
+        <div class="stat-box">
+            <span class="stat-label">Messages</span>
+            <strong id="total-messages" class="stat-value">0</strong>
+        </div>
+        <div class="stat-box alert">
+            <span class="stat-label">Alertes</span>
+            <strong id="active-alerts" class="stat-value">0</strong>
+        </div>
+        <div class="stat-box" style="grid-column: span 2; border-bottom-color: #a855f7;">
+            <span class="stat-label">Débit Kafka</span>
+            <strong id="kafka-throughput" class="stat-value">0 msg/s</strong>
+        </div>
+    </div>
+    <div class="controls">
+        <input type="text" id="driverName" placeholder="ID (ex: DRV_004)">
+        <button class="btn-add" onclick="updateDrivers('add')">+</button>
+        <button class="btn-del" onclick="updateDrivers('remove')">-</button>
+    </div>
+
+    <div class="section-title">Livreurs</div>
+    <div id="driver-list" style="overflow-y: auto; flex-grow: 1;"></div>
+</div>
+
+<div id="map"></div>
+
+<script>
+    const driverNames = { "DRV_001": "Amadou BA", "DRV_002": "Mouhamed SOW", "DRV_003": "Ousmane DIOP", "DRV_004": "Badou NDIAYE" };
+    let totalMsgCount = 0;
+    let msgLastSecond = 0;
+    const criticalDrivers = new Set(); 
+
+    setInterval(() => {
+        document.getElementById('kafka-throughput').innerText = msgLastSecond + " msg/s";
+        msgLastSecond = 0; 
+    }, 1000);
+
+    const map = L.map('map').setView([14.7300, -17.4350], 12); 
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', { attribution: '&copy; OpenStreetMap' }).addTo(map);
+
+    const createBikeIcon = (battery) => {
+        let statusEmoji = '✅'; 
+        if (battery < 15) statusEmoji = '🚨'; 
+        else if (battery < 50) statusEmoji = '⚠️'; 
+        
+        return L.divIcon({
+            html: `<div style="margin-bottom:-5px;">${statusEmoji}</div>🚲`,
+            className: 'bike-icon',
+            iconSize: [40, 40],
+            iconAnchor: [20, 20]
+        });
+    };
+
+    const markers = {};
+    const socket = io();
+
+    socket.on('new_location', function(data) {
+        totalMsgCount++;
+        msgLastSecond++; 
+        document.getElementById('total-messages').innerText = totalMsgCount;
+
+        if (data.battery < 15) criticalDrivers.add(data.driver_id);
+        else criticalDrivers.delete(data.driver_id);
+        document.getElementById('active-alerts').innerText = criticalDrivers.size;
+
+        const { driver_id, lat, lon, battery } = data;
+        const fullName = data.full_name || driverNames[driver_id] || driver_id;
+
+        if (markers[driver_id]) {
+            markers[driver_id].setLatLng([lat, lon]);
+            markers[driver_id].setIcon(createBikeIcon(battery));
+            markers[driver_id].setTooltipContent(fullName);
+        } else {
+            // Remise des étiquettes de noms sur la carte
+            markers[driver_id] = L.marker([lat, lon], { icon: createBikeIcon(battery) })
+                .addTo(map).bindTooltip(fullName, {
+                    permanent: true, direction: 'top', className: 'custom-label', offset: [0, -30] 
+                });
+        }
+        updateUI(data);
+    });
+
+    function updateUI(data) {
+        const displayName = data.full_name || driverNames[data.driver_id] || data.driver_id;
+        let card = document.getElementById('card-' + data.driver_id);
+        
+        if (!card) {
+            card = document.createElement('div');
+            card.id = 'card-' + data.driver_id;
+            document.getElementById('driver-list').prepend(card);
+        }
+        
+        let statusClass = '';
+        if (data.battery < 15) statusClass = 'critical';
+        else if (data.battery < 50) statusClass = 'warning';
+        
+        card.className = 'driver-card ' + statusClass;
+        card.innerHTML = `
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <strong>🚲 ${displayName}</strong>
+                <span>${data.battery < 15 ? '🚨' : (data.battery < 50 ? '⚠️' : '✅')}</span>
+            </div>
+            <div style="font-size: 0.85em; margin-top: 8px; line-height: 1.5;">
+                <span style="color: #4ade80;">🔋 Batterie :</span> ${data.battery}%<br>
+                <span style="color: #60a5fa;">📍 Lat/Lon :</span> ${data.lat.toFixed(5)}, ${data.lon.toFixed(5)}<br>
+                <span style="color: #fbbf24;">⚡ Vitesse :</span> ${data.vitesse || 0} km/h<br>
+                <span style="color: #94a3b8;">🕒 MàJ :</span> ${new Date().toLocaleTimeString()}
+            </div>
+            <progress value="${data.battery}" max="100" style="margin-top:10px;"></progress>
+        `;
+    }
+
+    function updateDrivers(action) {
+        const id = document.getElementById('driverName').value;
+        if(!id) return;
+        fetch('/manage_driver', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ action: action, driver_id: id })
+        }).then(() => {
+            if(action === 'remove' && markers[id]) {
+                map.removeLayer(markers[id]);
+                delete markers[id];
+                document.getElementById('card-' + id)?.remove();
+                criticalDrivers.delete(id);
+                document.getElementById('active-alerts').innerText = criticalDrivers.size;
+            }
+            document.getElementById('driverName').value = "";
+        });
+    }
+</script>
+</body>
+</html>

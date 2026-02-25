@@ -1,0 +1,32 @@
+name: CI/CD Smart Delivery
+
+on:
+  push:
+    branches: [ main ] # Se déclenche quand tu pousses sur la branche main
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v3
+
+      - name: Connexion à Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build et Push Dashboard
+        uses: docker/build-push-action@v4
+        with:
+          context: ./dashboard
+          push: true
+          tags: ton-pseudo-docker/smart-dashboard:latest
+
+      - name: Build et Push Producer
+        uses: docker/build-push-action@v4
+        with:
+          context: ./producer
+          push: true
+          tags: ton-pseudo-docker/smart-producer:latest
