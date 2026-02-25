@@ -20,13 +20,13 @@ jobs:
       - name: Build et Push Dashboard
         uses: docker/build-push-action@v4
         with:
-          context: ./dashboard
+          context: ./delivery_dashboard
           push: true
-          tags: ton-pseudo-docker/smart-dashboard:latest
+          tags: aby1001/delivery_dashboard:latest
 
       - name: Build et Push Producer
         uses: docker/build-push-action@v4
         with:
-          context: ./producer
+          context: ./delivery_producer
           push: true
-          tags: ton-pseudo-docker/smart-producer:latest
+          tags: aby1001/delivery_producer:latest
